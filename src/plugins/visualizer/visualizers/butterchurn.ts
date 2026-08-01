@@ -1,12 +1,16 @@
 import Butterchurn from 'butterchurn';
-import ButterchurnPresetsImport from 'butterchurn-presets';
+import ButterchurnBaseImport from 'butterchurn-presets/dist/base.js';
+import ButterchurnExtraImport from 'butterchurn-presets/dist/extra.js';
 
 import { unwrapButterchurnPresets } from './butterchurn-presets-interop';
 import { Visualizer } from './visualizer';
 
 import type { VisualizerPluginConfig } from '../index';
 
-const ButterchurnPresets = unwrapButterchurnPresets(ButterchurnPresetsImport);
+const ButterchurnPresets: Record<string, unknown> = {
+  ...unwrapButterchurnPresets(ButterchurnBaseImport),
+  ...unwrapButterchurnPresets(ButterchurnExtraImport),
+};
 
 class ButterchurnVisualizer extends Visualizer {
   private readonly visualizer: ReturnType<typeof Butterchurn.createVisualizer>;

@@ -21,6 +21,15 @@ type WaveColor = {
 // Fixed choices only: Electron native menus can't take free-text numeric input.
 const CYCLE_INTERVAL_CHOICES_SECONDS = [0, 15, 30, 60, 120, 300, 600] as const;
 
+// TEMP-DEBUG: everything tagged TEMP-DEBUG is a throwaway dev aid for
+// verifying preset-change attribution and gets stripped before the PR.
+type PresetChangeReason = 'manual' | 'interval' | 'song-change';
+const PRESET_CHANGE_REASON_LABELS: Record<PresetChangeReason, string> = {
+  'manual': 'manually chosen',
+  'interval': 'timer cycle',
+  'song-change': 'new song',
+};
+
 export type VisualizerPluginConfig = {
   enabled: boolean;
   type: 'butterchurn' | 'vudio' | 'wave';
@@ -32,6 +41,10 @@ export type VisualizerPluginConfig = {
       intervalSeconds: (typeof CYCLE_INTERVAL_CHOICES_SECONDS)[number];
       onSongChange: boolean;
     };
+    // TEMP-DEBUG
+    notifyOnPresetChange: boolean;
+    // TEMP-DEBUG
+    lastPresetChangeReason: PresetChangeReason;
   };
   vudio: {
     effect: string;
@@ -86,7 +99,7 @@ type RendererThis = {
   props: RenderProps;
   createVisualizer: (config: VisualizerPluginConfig) => void;
   reconcileCycleTimer: (config: VisualizerPluginConfig) => void;
-  cyclePreset: () => Promise<void>;
+  cyclePreset: (reason: 'interval' | 'song-change') => Promise<void>;
 };
 
 let cachedPresetNamesPromise: Promise<string[]> | null = null;
@@ -101,8 +114,14 @@ const getButterchurnPresetNames = (): Promise<string[]> => {
     const globalWithSelf = globalThis as unknown as { self?: unknown };
     globalWithSelf.self ??= globalThis;
 
-    const imported = await import('butterchurn-presets');
-    const presets = unwrapButterchurnPresets(imported);
+    const [base, extra] = await Promise.all([
+      import('butterchurn-presets/dist/base.js'),
+      import('butterchurn-presets/dist/extra.js'),
+    ]);
+    const presets = {
+      ...unwrapButterchurnPresets(base),
+      ...unwrapButterchurnPresets(extra),
+    };
     return Object.keys(presets).sort((a, b) => a.localeCompare(b));
   })();
   return cachedPresetNamesPromise;
@@ -133,6 +152,10 @@ export default createPlugin({
         intervalSeconds: 0,
         onSongChange: false,
       },
+      // TEMP-DEBUG
+      notifyOnPresetChange: false,
+      // TEMP-DEBUG
+      lastPresetChangeReason: 'manual',
     },
     vudio: {
       effect: 'lighting',
@@ -218,7 +241,11 @@ export default createPlugin({
           checked: config.butterchurn.preset === presetName,
           async click() {
             await setConfig({
-              butterchurn: { ...config.butterchurn, preset: presetName },
+              butterchurn: {
+                ...config.butterchurn,
+                preset: presetName,
+                lastPresetChangeReason: 'manual', // TEMP-DEBUG
+              },
             });
             await refresh();
           },
@@ -266,6 +293,21 @@ export default createPlugin({
           await refresh();
         },
       },
+      // TEMP-DEBUG: strip this whole menu item before the PR
+      {
+        label: 'Show Visualizer Changes',
+        type: 'checkbox',
+        checked: config.butterchurn.notifyOnPresetChange,
+        async click() {
+          await setConfig({
+            butterchurn: {
+              ...config.butterchurn,
+              notifyOnPresetChange: !config.butterchurn.notifyOnPresetChange,
+            },
+          });
+          await refresh();
+        },
+      },
     ];
   },
 
@@ -305,11 +347,11 @@ export default createPlugin({
       if (!intervalSeconds) return;
 
       this.props.cycleTimer = setInterval(() => {
-        this.cyclePreset();
+        this.cyclePreset('interval');
       }, intervalSeconds * 1000);
     },
 
-    async cyclePreset(this: RendererThis) {
+    async cyclePreset(this: RendererThis, reason: 'interval' | 'song-change') {
       const config = this.props.lastConfig;
       if (!config || config.type !== 'butterchurn' || !this.props.setConfig) {
         return;
@@ -321,7 +363,11 @@ export default createPlugin({
         config.butterchurn.preset,
       );
       this.props.setConfig({
-        butterchurn: { ...config.butterchurn, preset: nextPreset },
+        butterchurn: {
+          ...config.butterchurn,
+          preset: nextPreset,
+          lastPresetChangeReason: reason, // TEMP-DEBUG
+        },
       });
     },
 
@@ -417,6 +463,24 @@ export default createPlugin({
         this.createVisualizer(newConfig);
       }
 
+      // TEMP-DEBUG: strip this whole block before the PR
+      if (
+        newConfig.type === 'butterchurn' &&
+        newConfig.butterchurn.notifyOnPresetChange &&
+        prevConfig?.type === 'butterchurn' &&
+        prevConfig.butterchurn.preset !== newConfig.butterchurn.preset
+      ) {
+        try {
+          new Notification('Visualizer preset changed', {
+            body: `${newConfig.butterchurn.preset}\n(${
+              PRESET_CHANGE_REASON_LABELS[
+                newConfig.butterchurn.lastPresetChangeReason
+              ]
+            })`,
+          });
+        } catch {}
+      }
+
       this.reconcileCycleTimer(newConfig);
     },
 
@@ -443,7 +507,7 @@ export default createPlugin({
             config?.type === 'butterchurn' &&
             config.butterchurn.cycle.onSongChange
           ) {
-            this.cyclePreset();
+            this.cyclePreset('song-change');
           }
         };
         video.addEventListener('peard:src-changed', this.props.onSongChanged);

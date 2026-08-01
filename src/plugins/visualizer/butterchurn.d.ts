@@ -76,3 +76,9 @@ declare module 'butterchurn-presets' {
 
   export default presets;
 }
+
+declare module 'butterchurn-presets/dist/*' {
+  const presets: Record<string, unknown>;
+
+  export default presets;
+}
