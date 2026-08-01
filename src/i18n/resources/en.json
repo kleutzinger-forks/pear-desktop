@@ -994,6 +994,10 @@
     "visualizer": {
       "description": "Adds a visualizer to the player",
       "menu": {
+        "butterchurn-cycle-interval": "Butterchurn Cycle Interval",
+        "butterchurn-cycle-off": "Off",
+        "butterchurn-cycle-on-song-change": "Butterchurn Cycle on Song Change",
+        "butterchurn-preset": "Butterchurn Preset",
         "visualizer-type": "Visualizer Type"
       },
       "name": "Visualizer"

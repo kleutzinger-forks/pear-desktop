@@ -1,9 +1,12 @@
 import Butterchurn from 'butterchurn';
-import ButterchurnPresets from 'butterchurn-presets';
+import ButterchurnPresetsImport from 'butterchurn-presets';
 
+import { unwrapButterchurnPresets } from './butterchurn-presets-interop';
 import { Visualizer } from './visualizer';
 
 import type { VisualizerPluginConfig } from '../index';
+
+const ButterchurnPresets = unwrapButterchurnPresets(ButterchurnPresetsImport);
 
 class ButterchurnVisualizer extends Visualizer {
   private readonly visualizer: ReturnType<typeof Butterchurn.createVisualizer>;
@@ -40,6 +43,12 @@ class ButterchurnVisualizer extends Visualizer {
 
   resize(width: number, height: number) {
     this.visualizer.setRendererSize(width, height);
+  }
+
+  setPreset(presetKey: string, blendTimeInSeconds: number) {
+    const preset = ButterchurnPresets[presetKey];
+    if (!preset) return;
+    this.visualizer.loadPreset(preset, blendTimeInSeconds);
   }
 
   destroy() {

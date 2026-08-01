@@ -7,12 +7,19 @@ import {
   VudioVisualizer as vudio,
   WaveVisualizer as wave,
 } from './visualizers';
+import { unwrapButterchurnPresets } from './visualizers/butterchurn-presets-interop';
 import { type Visualizer } from './visualizers/visualizer';
+
+import type { RendererContext } from '@/types/contexts';
+import type { MusicPlayer } from '@/types/music-player';
 
 type WaveColor = {
   gradient: string[];
   rotate?: number;
 };
+
+// Fixed choices only: Electron native menus can't take free-text numeric input.
+const CYCLE_INTERVAL_CHOICES_SECONDS = [0, 15, 30, 60, 120, 300, 600] as const;
 
 export type VisualizerPluginConfig = {
   enabled: boolean;
@@ -20,6 +27,11 @@ export type VisualizerPluginConfig = {
   butterchurn: {
     preset: string;
     blendTimeInSeconds: number;
+    cycle: {
+      // 0 disables interval-based cycling
+      intervalSeconds: (typeof CYCLE_INTERVAL_CHOICES_SECONDS)[number];
+      onSongChange: boolean;
+    };
   };
   vudio: {
     effect: string;
@@ -62,6 +74,48 @@ type RenderProps = {
   audioContext: AudioContext | null;
   audioSource: MediaElementAudioSourceNode | null;
   observer: ResizeObserver | null;
+  lastConfig: VisualizerPluginConfig | null;
+  cycleTimer: ReturnType<typeof setInterval> | null;
+  setConfig: RendererContext<VisualizerPluginConfig>['setConfig'] | null;
+  onSongChanged: (() => void) | null;
+};
+
+// Explicit `this` typing sidesteps fragile self-referential inference of the
+// generic `RendererPluginLifecycle` `This` type for our own custom methods.
+type RendererThis = {
+  props: RenderProps;
+  createVisualizer: (config: VisualizerPluginConfig) => void;
+  reconcileCycleTimer: (config: VisualizerPluginConfig) => void;
+  cyclePreset: () => Promise<void>;
+};
+
+let cachedPresetNamesPromise: Promise<string[]> | null = null;
+
+// This module also loads in the Electron main process, to build the native
+// menu below, where there's no `self` global — but `butterchurn-presets`'
+// bundled UMD output assumes one exists. Import it dynamically, only when a
+// preset name list is actually needed, polyfilling `self` first; cached
+// since both the menu and cycling call this repeatedly.
+const getButterchurnPresetNames = (): Promise<string[]> => {
+  cachedPresetNamesPromise ??= (async () => {
+    const globalWithSelf = globalThis as unknown as { self?: unknown };
+    globalWithSelf.self ??= globalThis;
+
+    const imported = await import('butterchurn-presets');
+    const presets = unwrapButterchurnPresets(imported);
+    return Object.keys(presets).sort((a, b) => a.localeCompare(b));
+  })();
+  return cachedPresetNamesPromise;
+};
+
+const pickRandomPreset = (presetNames: string[], excluding: string): string => {
+  if (presetNames.length <= 1) return presetNames[0] ?? excluding;
+
+  let next: string;
+  do {
+    next = presetNames[Math.floor(Math.random() * presetNames.length)]!;
+  } while (next === excluding);
+  return next;
 };
 
 export default createPlugin({
@@ -75,6 +129,10 @@ export default createPlugin({
     butterchurn: {
       preset: 'martin [shadow harlequins shape code] - fata morgana',
       blendTimeInSeconds: 2.7,
+      cycle: {
+        intervalSeconds: 0,
+        onSongChange: false,
+      },
     },
     vudio: {
       effect: 'lighting',
@@ -137,6 +195,7 @@ export default createPlugin({
   menu: async ({ getConfig, setConfig }) => {
     const config = await getConfig();
     const visualizerTypes = ['butterchurn', 'vudio', 'wave'] as const; // For bundling
+    const presetNames = await getButterchurnPresetNames();
 
     return [
       {
@@ -150,6 +209,59 @@ export default createPlugin({
           },
         })),
       },
+      {
+        label: t('plugins.visualizer.menu.butterchurn-preset'),
+        submenu: presetNames.map((presetName) => ({
+          label: presetName,
+          type: 'radio',
+          checked: config.butterchurn.preset === presetName,
+          click() {
+            setConfig({
+              butterchurn: { ...config.butterchurn, preset: presetName },
+            });
+          },
+        })),
+      },
+      {
+        label: t('plugins.visualizer.menu.butterchurn-cycle-interval'),
+        submenu: CYCLE_INTERVAL_CHOICES_SECONDS.map((seconds) => ({
+          label:
+            seconds === 0
+              ? t('plugins.visualizer.menu.butterchurn-cycle-off')
+              : seconds < 60
+                ? `${seconds}s`
+                : `${seconds / 60}m`,
+          type: 'radio',
+          checked: config.butterchurn.cycle.intervalSeconds === seconds,
+          click() {
+            setConfig({
+              butterchurn: {
+                ...config.butterchurn,
+                cycle: {
+                  ...config.butterchurn.cycle,
+                  intervalSeconds: seconds,
+                },
+              },
+            });
+          },
+        })),
+      },
+      {
+        label: t('plugins.visualizer.menu.butterchurn-cycle-on-song-change'),
+        type: 'checkbox',
+        checked: config.butterchurn.cycle.onSongChange,
+        click() {
+          setConfig({
+            butterchurn: {
+              ...config.butterchurn,
+              cycle: {
+                ...config.butterchurn.cycle,
+                onSongChange: !config.butterchurn.cycle.onSongChange,
+              },
+            },
+          });
+        },
+      },
     ];
   },
 
@@ -159,12 +271,57 @@ export default createPlugin({
       audioContext: null,
       audioSource: null,
       observer: null,
+      lastConfig: null,
+      cycleTimer: null,
+      setConfig: null,
+      onSongChanged: null,
     } as RenderProps,
 
-    createVisualizer(
-      this: { props: RenderProps },
-      config: VisualizerPluginConfig,
+    async start(
+      this: RendererThis,
+      context: RendererContext<VisualizerPluginConfig>,
     ) {
+      this.props.setConfig = context.setConfig;
+
+      const config = await context.getConfig();
+      this.props.lastConfig = config;
+      this.reconcileCycleTimer(config);
+    },
+
+    reconcileCycleTimer(this: RendererThis, config: VisualizerPluginConfig) {
+      if (this.props.cycleTimer) {
+        clearInterval(this.props.cycleTimer);
+        this.props.cycleTimer = null;
+      }
+
+      const intervalSeconds =
+        config.enabled && config.type === 'butterchurn'
+          ? config.butterchurn.cycle.intervalSeconds
+          : 0;
+      if (!intervalSeconds) return;
+
+      this.props.cycleTimer = setInterval(() => {
+        this.cyclePreset();
+      }, intervalSeconds * 1000);
+    },
+
+    async cyclePreset(this: RendererThis) {
+      const config = this.props.lastConfig;
+      if (!config || config.type !== 'butterchurn' || !this.props.setConfig) {
+        return;
+      }
+
+      const presetNames = await getButterchurnPresetNames();
+      const nextPreset = pickRandomPreset(
+        presetNames,
+        config.butterchurn.preset,
+      );
+      this.props.setConfig({
+        butterchurn: { ...config.butterchurn, preset: nextPreset },
+      });
+    },
+
+    createVisualizer(this: RendererThis, config: VisualizerPluginConfig) {
       this.props.visualizerInstance?.destroy();
       this.props.visualizerInstance = null;
 
@@ -228,11 +385,42 @@ export default createPlugin({
       this.props.observer.observe(visualizerContainer);
     },
 
-    onConfigChange(newConfig) {
-      this.createVisualizer(newConfig);
+    onConfigChange(this: RendererThis, newConfig: VisualizerPluginConfig) {
+      const prevConfig = this.props.lastConfig;
+      this.props.lastConfig = newConfig;
+
+      const instance = this.props.visualizerInstance;
+      const canLiveUpdatePreset =
+        newConfig.enabled &&
+        instance instanceof butterchurn &&
+        prevConfig?.type === 'butterchurn' &&
+        newConfig.type === 'butterchurn';
+
+      if (canLiveUpdatePreset) {
+        const prevButterchurn = prevConfig.butterchurn;
+        const nextButterchurn = newConfig.butterchurn;
+        if (
+          prevButterchurn.preset !== nextButterchurn.preset ||
+          prevButterchurn.blendTimeInSeconds !==
+            nextButterchurn.blendTimeInSeconds
+        ) {
+          instance.setPreset(
+            nextButterchurn.preset,
+            nextButterchurn.blendTimeInSeconds,
+          );
+        }
+      } else {
+        this.createVisualizer(newConfig);
+      }
+
+      this.reconcileCycleTimer(newConfig);
     },
 
-    onPlayerApiReady(_, { getConfig }) {
+    onPlayerApiReady(
+      this: RendererThis,
+      _: MusicPlayer,
+      { getConfig }: RendererContext<VisualizerPluginConfig>,
+    ) {
       document.addEventListener(
         'peard:audio-can-play',
         async (e) => {
@@ -242,6 +430,42 @@ export default createPlugin({
         },
         { passive: true },
       );
+
+      const video = document.querySelector<HTMLVideoElement>('video');
+      if (video) {
+        this.props.onSongChanged = () => {
+          const config = this.props.lastConfig;
+          if (
+            config?.type === 'butterchurn' &&
+            config.butterchurn.cycle.onSongChange
+          ) {
+            this.cyclePreset();
+          }
+        };
+        video.addEventListener('peard:src-changed', this.props.onSongChanged);
+      }
+    },
+
+    stop(this: RendererThis) {
+      if (this.props.cycleTimer) {
+        clearInterval(this.props.cycleTimer);
+        this.props.cycleTimer = null;
+      }
+
+      const video = document.querySelector<HTMLVideoElement>('video');
+      if (video && this.props.onSongChanged) {
+        video.removeEventListener(
+          'peard:src-changed',
+          this.props.onSongChanged,
+        );
+      }
+      this.props.onSongChanged = null;
+
+      this.props.observer?.disconnect();
+      this.props.observer = null;
+
+      this.props.visualizerInstance?.destroy();
+      this.props.visualizerInstance = null;
     },
   },
 });
