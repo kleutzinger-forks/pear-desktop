@@ -192,7 +192,7 @@ export default createPlugin({
     },
   } as VisualizerPluginConfig,
   stylesheets: [emptyStyle],
-  menu: async ({ getConfig, setConfig }) => {
+  menu: async ({ getConfig, setConfig, refresh }) => {
     const config = await getConfig();
     const visualizerTypes = ['butterchurn', 'vudio', 'wave'] as const; // For bundling
     const presetNames = await getButterchurnPresetNames();
@@ -204,8 +204,9 @@ export default createPlugin({
           label: visualizerType,
           type: 'radio',
           checked: config.type === visualizerType,
-          click() {
-            setConfig({ type: visualizerType });
+          async click() {
+            await setConfig({ type: visualizerType });
+            await refresh();
           },
         })),
       },
@@ -215,10 +216,11 @@ export default createPlugin({
           label: presetName,
           type: 'radio',
           checked: config.butterchurn.preset === presetName,
-          click() {
-            setConfig({
+          async click() {
+            await setConfig({
               butterchurn: { ...config.butterchurn, preset: presetName },
             });
+            await refresh();
           },
         })),
       },
@@ -233,8 +235,8 @@ export default createPlugin({
                 : `${seconds / 60}m`,
           type: 'radio',
           checked: config.butterchurn.cycle.intervalSeconds === seconds,
-          click() {
-            setConfig({
+          async click() {
+            await setConfig({
               butterchurn: {
                 ...config.butterchurn,
                 cycle: {
@@ -243,6 +245,7 @@ export default createPlugin({
                 },
               },
             });
+            await refresh();
           },
         })),
       },
@@ -250,8 +253,8 @@ export default createPlugin({
         label: t('plugins.visualizer.menu.butterchurn-cycle-on-song-change'),
         type: 'checkbox',
         checked: config.butterchurn.cycle.onSongChange,
-        click() {
-          setConfig({
+        async click() {
+          await setConfig({
             butterchurn: {
               ...config.butterchurn,
               cycle: {
@@ -260,6 +263,7 @@ export default createPlugin({
               },
             },
           });
+          await refresh();
         },
       },
     ];
