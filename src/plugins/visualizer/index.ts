@@ -494,7 +494,19 @@ export default createPlugin({
         async (e) => {
           this.props.audioContext = e.detail.audioContext;
           this.props.audioSource = e.detail.audioSource;
-          this.createVisualizer(await getConfig());
+
+          const config = await getConfig();
+          // This event refires on every song (not just once at startup).
+          // Butterchurn doesn't need a fresh MediaStream per song (unlike
+          // vudio), so skip the teardown/rebuild when an instance is
+          // already running — otherwise every song change flashes
+          // Butterchurn's blank default preset while it reinitializes.
+          const canKeepRunningInstance =
+            config.type === 'butterchurn' &&
+            this.props.visualizerInstance instanceof butterchurn;
+          if (!canKeepRunningInstance) {
+            this.createVisualizer(config);
+          }
         },
         { passive: true },
       );
